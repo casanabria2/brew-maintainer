@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brew-maintainer"
+version = "1.0.0"
+description = "Automated Homebrew package maintenance"
+authors = [{name = "Carlos"}]
+requires-python = ">=3.8"
+dependencies = []
+
+[project.scripts]
+brew-maintainer = "brew_maintainer.cli:main"
