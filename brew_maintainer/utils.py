@@ -345,32 +345,12 @@ def parse_upgraded_names(output: str) -> list:
 
     names = []
 
-    # Look for "==> Upgrading N outdated packages:" followed by one package per line
-    # Each line looks like: "arc 1.137.0,76310 -> 1.139.0,77482"
-    header_match = re.search(r'==> Upgrading \d+ outdated package[s]?:\n((?:.+\n?)+)', output)
-    if header_match:
-        for line in header_match.group(1).strip().splitlines():
-            line = line.strip()
-            if line and not line.startswith('==>'):
-                name = line.split()[0]
-                if name:
-                    names.append(name)
-        if names:
-            return names
-
-    # Fallback: look for "==> Upgrading package_name" lines
-    for match in re.finditer(r'==> Upgrading (.+?)\.\.\.', output):
+    # Look for lines in the package list after "==> Upgrading N outdated packages:"
+    # Each line looks like: "arc 1.137.0,76310 -> 1.139.0,77482" or "awscli 2.34.13 -> 2.34.14"
+    # Only match lines that have the "name version -> version" pattern
+    for match in re.finditer(r'^([a-zA-Z0-9@/_-]+)\s+\S+\s+->\s+\S+', output, re.MULTILINE):
         name = match.group(1).strip()
-        if name:
-            names.append(name)
-
-    if names:
-        return names
-
-    # Fallback: look for lines with "package version -> version"
-    for match in re.finditer(r'^(\S+)\s+[\d.]+ -> [\d.]+', output, re.MULTILINE):
-        name = match.group(1).strip()
-        if name and not name.startswith('==>'):
+        if name and name not in names:
             names.append(name)
 
     return names
