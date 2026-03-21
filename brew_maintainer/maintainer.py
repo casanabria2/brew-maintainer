@@ -1,17 +1,21 @@
 """Core Homebrew maintenance operations."""
 
 import logging
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 from pathlib import Path
 
-from .utils import run_command, parse_upgrade_count, parse_cleanup_size
+from .utils import (
+    run_command, parse_upgrade_count, parse_cleanup_size,
+    create_askpass_env, cleanup_askpass_env, keychain_has_password,
+    prime_sudo_credentials
+)
 
 
 class BrewMaintainer:
     """Manages Homebrew package updates and cleanup."""
 
     def __init__(self, dry_run: bool = False, skip_backup: bool = False,
-                 backup_dir: Optional[str] = None):
+                 backup_dir: Optional[str] = None, use_keychain: bool = False):
         """
         Initialize the Homebrew maintainer.
 
@@ -19,17 +23,45 @@ class BrewMaintainer:
             dry_run: If True, show what would be done without executing
             skip_backup: If True, skip backup operations
             backup_dir: Custom backup directory path
+            use_keychain: If True, use macOS keychain for sudo password
         """
         self.logger = logging.getLogger('brew_maintainer')
         self.dry_run = dry_run
         self.skip_backup = skip_backup
         self.backup_dir = Path(backup_dir) if backup_dir else None
+        self.use_keychain = use_keychain
+        self._env: Optional[Dict[str, str]] = None
         self.stats = {
             'formulae_upgraded': 0,
             'casks_upgraded': 0,
             'space_freed': '0 B',
             'backup_created': False
         }
+
+    def _get_env(self) -> Optional[Dict[str, str]]:
+        """Get environment with SUDO_ASKPASS if keychain is enabled."""
+        if self.use_keychain and self._env is None:
+            if not keychain_has_password():
+                self.logger.warning(
+                    "Keychain password not found. Run 'brew-maintainer setup-keychain' first."
+                )
+            else:
+                self._env = create_askpass_env()
+                # Prime sudo credentials so brew's internal sudo calls won't prompt
+                if prime_sudo_credentials():
+                    self.logger.debug("Using keychain for sudo authentication")
+                else:
+                    self.logger.warning(
+                        "Could not authenticate sudo with keychain password. "
+                        "You may be prompted for password."
+                    )
+        return self._env
+
+    def _cleanup_env(self) -> None:
+        """Clean up temporary askpass script."""
+        if self._env is not None:
+            cleanup_askpass_env(self._env)
+            self._env = None
 
     def update_packages(self) -> Dict[str, Any]:
         """
@@ -45,7 +77,8 @@ class BrewMaintainer:
 
         # Step 1: Update Homebrew itself
         self.logger.info("Updating Homebrew...")
-        result = run_command(['brew', 'update'], dry_run=self.dry_run)
+        env = self._get_env()
+        run_command(['brew', 'update'], dry_run=self.dry_run, env=env, stream_output=True)
 
         # Step 2: Upgrade formulae
         self.logger.info("Upgrading formulae...")
@@ -53,14 +86,14 @@ class BrewMaintainer:
             result_formula = run_command(
                 ['brew', 'upgrade', '--formula'],
                 dry_run=self.dry_run,
-                check=False  # Don't fail if nothing to upgrade
+                check=False,  # Don't fail if nothing to upgrade
+                env=env,
+                stream_output=True
             )
             formulae_count = parse_upgrade_count(result_formula.stdout)
             self.stats['formulae_upgraded'] = formulae_count
 
-            if formulae_count > 0:
-                self.logger.info(f"Upgraded {formulae_count} formulae")
-            else:
+            if formulae_count == 0:
                 self.logger.info("No formulae to upgrade")
 
         except Exception as e:
@@ -73,14 +106,14 @@ class BrewMaintainer:
             result_cask = run_command(
                 ['brew', 'upgrade', '--cask', '--greedy'],
                 dry_run=self.dry_run,
-                check=False  # Don't fail if nothing to upgrade
+                check=False,  # Don't fail if nothing to upgrade
+                env=env,
+                stream_output=True
             )
             casks_count = parse_upgrade_count(result_cask.stdout)
             self.stats['casks_upgraded'] = casks_count
 
-            if casks_count > 0:
-                self.logger.info(f"Upgraded {casks_count} casks")
-            else:
+            if casks_count == 0:
                 self.logger.info("No casks to upgrade")
 
         except Exception as e:
@@ -108,27 +141,36 @@ class BrewMaintainer:
         self.logger.info("Starting cleanup...")
 
         try:
+            env = self._get_env()
             # Run cleanup with scrub flag
             self.logger.info("Removing old versions...")
-            result = run_command(
+            result_cleanup = run_command(
                 ['brew', 'cleanup', '-s'],
                 dry_run=self.dry_run,
-                check=False
+                check=False,
+                env=env,
+                stream_output=True
             )
 
             # Prune old cache files
             self.logger.info("Pruning cache...")
-            run_command(
+            result_prune = run_command(
                 ['brew', 'cleanup', '--prune=all'],
                 dry_run=self.dry_run,
-                check=False
+                check=False,
+                env=env,
+                stream_output=True
             )
 
-            # Parse space freed
-            space_freed = parse_cleanup_size(result.stderr + result.stdout)
+            # Parse space freed from both commands
+            combined_output = (
+                result_cleanup.stdout + result_cleanup.stderr +
+                result_prune.stdout + result_prune.stderr
+            )
+            space_freed = parse_cleanup_size(combined_output)
             self.stats['space_freed'] = space_freed
 
-            if space_freed != "0 B" and space_freed != "Unknown":
+            if space_freed != "0 B":
                 self.logger.info(f"Cleanup complete: freed {space_freed}")
             else:
                 self.logger.info("Cleanup complete: no space to free")
@@ -233,6 +275,9 @@ class BrewMaintainer:
 
         # Combine all stats
         all_stats = {**update_stats, **cleanup_stats, **backup_stats}
+
+        # Clean up askpass script
+        self._cleanup_env()
 
         self.logger.info("=" * 60)
         self.logger.info("Maintenance complete")

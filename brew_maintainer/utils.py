@@ -1,11 +1,16 @@
 """Utility functions for brew-maintainer."""
 
 import logging
+import os
 import subprocess
 import sys
+import tempfile
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
+
+# Keychain service name for storing sudo password
+KEYCHAIN_SERVICE = "brew-maintainer-sudo"
 
 
 class BrewError(Exception):
@@ -28,12 +33,153 @@ class BrewCommandError(BrewError):
         super().__init__(f"Command failed with code {returncode}: {' '.join(command)}")
 
 
+def keychain_has_password() -> bool:
+    """Check if sudo password is stored in keychain."""
+    try:
+        result = subprocess.run(
+            ['security', 'find-generic-password', '-s', KEYCHAIN_SERVICE, '-w'],
+            capture_output=True,
+            text=True
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def keychain_store_password(password: str) -> bool:
+    """
+    Store sudo password in macOS keychain.
+
+    Args:
+        password: The sudo password to store
+
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        # Delete existing entry if present (ignore errors)
+        subprocess.run(
+            ['security', 'delete-generic-password', '-s', KEYCHAIN_SERVICE],
+            capture_output=True
+        )
+        # Add new entry
+        result = subprocess.run(
+            ['security', 'add-generic-password',
+             '-s', KEYCHAIN_SERVICE,
+             '-a', os.environ.get('USER', 'user'),
+             '-w', password],
+            capture_output=True,
+            text=True
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def keychain_delete_password() -> bool:
+    """Delete sudo password from keychain."""
+    try:
+        result = subprocess.run(
+            ['security', 'delete-generic-password', '-s', KEYCHAIN_SERVICE],
+            capture_output=True
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def create_askpass_env() -> Dict[str, str]:
+    """
+    Create environment with SUDO_ASKPASS pointing to a keychain helper.
+
+    Returns:
+        Environment dict with SUDO_ASKPASS set
+    """
+    # Create a temporary askpass script
+    askpass_script = f'''#!/bin/bash
+security find-generic-password -s "{KEYCHAIN_SERVICE}" -w 2>/dev/null
+'''
+    # Create temp file that persists until process ends
+    fd, askpass_path = tempfile.mkstemp(prefix='brew_askpass_', suffix='.sh')
+    try:
+        os.write(fd, askpass_script.encode())
+        os.close(fd)
+        os.chmod(askpass_path, 0o700)
+    except Exception:
+        os.close(fd)
+        raise
+
+    env = os.environ.copy()
+    env['SUDO_ASKPASS'] = askpass_path
+    # Store path for cleanup
+    env['_ASKPASS_TEMP_FILE'] = askpass_path
+    return env
+
+
+def prime_sudo_credentials() -> bool:
+    """
+    Prime sudo credential cache using password from keychain.
+
+    This authenticates sudo once so subsequent sudo calls (including those
+    made internally by brew) won't prompt for a password during the cache
+    validity period.
+
+    Returns:
+        True if sudo was successfully authenticated, False otherwise
+    """
+    logger = logging.getLogger('brew_maintainer')
+
+    try:
+        # Get password from keychain
+        result = subprocess.run(
+            ['security', 'find-generic-password', '-s', KEYCHAIN_SERVICE, '-w'],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            logger.warning("Could not retrieve password from keychain")
+            return False
+
+        password = result.stdout.strip()
+
+        # Authenticate sudo with the password (validates and caches credentials)
+        auth_result = subprocess.run(
+            ['sudo', '-S', '-v'],
+            input=password + '\n',
+            capture_output=True,
+            text=True
+        )
+
+        if auth_result.returncode == 0:
+            logger.debug("sudo credentials cached successfully")
+            return True
+        else:
+            logger.warning("Failed to authenticate sudo with keychain password")
+            return False
+
+    except Exception as e:
+        logger.warning(f"Error priming sudo credentials: {e}")
+        return False
+
+
+def cleanup_askpass_env(env: Dict[str, str]) -> None:
+    """Clean up temporary askpass script."""
+    askpass_path = env.get('_ASKPASS_TEMP_FILE')
+    if askpass_path and os.path.exists(askpass_path):
+        try:
+            os.unlink(askpass_path)
+        except Exception:
+            pass
+
+
 def run_command(
     cmd: List[str],
     check: bool = True,
     capture_output: bool = True,
     dry_run: bool = False,
-    timeout: int = 3600
+    timeout: int = 3600,
+    env: Optional[Dict[str, str]] = None,
+    stream_output: bool = False
 ) -> subprocess.CompletedProcess:
     """
     Run a command with error handling and logging.
@@ -44,6 +190,8 @@ def run_command(
         capture_output: Capture stdout and stderr
         dry_run: If True, log command but don't execute
         timeout: Command timeout in seconds (default: 1 hour)
+        env: Optional environment variables dict
+        stream_output: If True, stream output to terminal in real-time
 
     Returns:
         CompletedProcess object with stdout, stderr, and returncode
@@ -63,21 +211,50 @@ def run_command(
         )
 
     try:
-        result = subprocess.run(
-            cmd,
-            check=check,
-            capture_output=capture_output,
-            text=True,
-            timeout=timeout
-        )
+        if stream_output:
+            # Stream output to terminal while capturing for parsing
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env
+            )
+            output_lines = []
+            for line in process.stdout:
+                print(line, end='', flush=True)
+                output_lines.append(line)
+            process.wait(timeout=timeout)
+            combined_output = ''.join(output_lines)
 
-        if result.stdout:
-            logger.debug(f"stdout: {result.stdout.strip()}")
-        if result.stderr:
-            logger.debug(f"stderr: {result.stderr.strip()}")
+            result = subprocess.CompletedProcess(
+                args=cmd,
+                returncode=process.returncode,
+                stdout=combined_output,
+                stderr=""
+            )
+            if check and result.returncode != 0:
+                raise subprocess.CalledProcessError(
+                    result.returncode, cmd, result.stdout, result.stderr
+                )
+            return result
+        else:
+            result = subprocess.run(
+                cmd,
+                check=check,
+                capture_output=capture_output,
+                text=True,
+                timeout=timeout,
+                env=env
+            )
 
-        logger.debug(f"Command exited with code: {result.returncode}")
-        return result
+            if result.stdout:
+                logger.debug(f"stdout: {result.stdout.strip()}")
+            if result.stderr:
+                logger.debug(f"stderr: {result.stderr.strip()}")
+
+            logger.debug(f"Command exited with code: {result.returncode}")
+            return result
 
     except subprocess.CalledProcessError as e:
         logger.error(f"Command failed: {e.stderr if e.stderr else str(e)}")
@@ -164,11 +341,21 @@ def parse_upgrade_count(output: str) -> int:
     if not output or output.strip() == "":
         return 0
 
-    lines = output.strip().split('\n')
+    import re
 
-    # Count lines that look like package upgrades (contain ->)
-    upgrade_lines = [line for line in lines if '->' in line and '==>' in line]
+    # Look for "==> Upgrading N outdated packages:" header
+    match = re.search(r'==> Upgrading (\d+) outdated package', output)
+    if match:
+        return int(match.group(1))
 
+    # Fallback: count successful upgrade lines (🍺 ... was successfully upgraded!)
+    success_count = len(re.findall(r'🍺.*was successfully upgraded!', output))
+    if success_count > 0:
+        return success_count
+
+    # Fallback: count lines with version arrows (name X.X -> Y.Y)
+    # These appear as "  3.9.0.1 -> 3.9.0.2" or "pandoc 3.9.0.1 -> 3.9.0.2"
+    upgrade_lines = re.findall(r'[\d.]+ -> [\d.]+', output)
     return len(upgrade_lines)
 
 
@@ -185,17 +372,17 @@ def parse_cleanup_size(output: str) -> str:
     if not output:
         return "0 B"
 
-    # Look for patterns like "freed 1.2GB" or "Removing: /path/to/file (123.4MB)"
     import re
 
-    # Try to find total in output
-    match = re.search(r'freed\s+([\d.]+\s*[KMGT]?B)', output, re.IGNORECASE)
-    if match:
-        return match.group(1)
-
-    # Otherwise sum up individual removals
-    matches = re.findall(r'\(([\d.]+)\s*([KMGT]?B)\)', output)
+    # Look for "freed approximately X.XMB/GB" pattern from brew cleanup summary
+    # Example: "==> This operation has freed approximately 525.5MB of disk space."
+    matches = re.findall(
+        r'freed approximately ([\d.]+)\s*([KMGT]?B)',
+        output,
+        re.IGNORECASE
+    )
     if matches:
+        # Sum all "freed approximately" amounts (there may be multiple cleanup operations)
         total_bytes = 0
         for size, unit in matches:
             multiplier = {'B': 1, 'KB': 1024, 'MB': 1024**2, 'GB': 1024**3, 'TB': 1024**4}
@@ -207,4 +394,9 @@ def parse_cleanup_size(output: str) -> str:
             if total_bytes >= divisor:
                 return f"{total_bytes / divisor:.1f} {unit}"
 
-    return "Unknown"
+    # Fallback: look for simple "freed X.XGB" pattern
+    match = re.search(r'freed\s+([\d.]+\s*[KMGT]?B)', output, re.IGNORECASE)
+    if match:
+        return match.group(1)
+
+    return "0 B"

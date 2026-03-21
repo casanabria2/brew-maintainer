@@ -67,7 +67,27 @@ python -m brew_maintainer --backup-dir /path/to/backups
 
 # Quiet mode (errors only)
 python -m brew_maintainer --quiet
+
+# Use keychain for sudo password (see Unattended Operation below)
+python -m brew_maintainer --use-keychain
 ```
+
+## Unattended Operation
+
+Some cask upgrades require sudo. To run without password prompts (e.g., via cron), store your sudo password in macOS keychain:
+
+```bash
+# One-time setup: store your sudo password
+python -m brew_maintainer setup-keychain
+
+# Run with stored password (no prompts)
+python -m brew_maintainer --use-keychain
+
+# Remove stored password
+python -m brew_maintainer remove-keychain
+```
+
+The password is stored securely in your macOS login keychain under the service name `brew-maintainer-sudo`.
 
 ## Backup System
 
@@ -96,8 +116,8 @@ To run automatically on a schedule, add to crontab:
 # Edit crontab
 crontab -e
 
-# Add line to run daily at 2 AM
-0 2 * * * cd /Users/carlos/dev/carlos/brew-maintainer && python -m brew_maintainer --quiet
+# Add line to run daily at 2 AM (with keychain for unattended cask updates)
+0 2 * * * cd /Users/carlos/dev/carlos/brew-maintainer && python -m brew_maintainer --quiet --use-keychain
 ```
 
 ## Requirements
