@@ -197,6 +197,14 @@ def main() -> None:
             _remove_keychain(logger)
             return
 
+        # Validate keychain password exists if --use-keychain was specified
+        if args.use_keychain and not keychain_has_password():
+            logger.error(
+                "No sudo password found in keychain. "
+                "Run 'brew-maintainer setup-keychain' first."
+            )
+            sys.exit(1)
+
         # Initialize maintainer
         maintainer = BrewMaintainer(
             dry_run=args.dry_run,

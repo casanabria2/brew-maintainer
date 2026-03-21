@@ -328,6 +328,54 @@ def setup_logging(verbose: bool = False, quiet: bool = False) -> logging.Logger:
     return logger
 
 
+def parse_upgraded_names(output: str) -> list:
+    """
+    Parse the names of upgraded packages from brew output.
+
+    Args:
+        output: Output from brew upgrade command
+
+    Returns:
+        List of package names that were upgraded
+    """
+    if not output or output.strip() == "":
+        return []
+
+    import re
+
+    names = []
+
+    # Look for "==> Upgrading N outdated packages:" followed by one package per line
+    # Each line looks like: "arc 1.137.0,76310 -> 1.139.0,77482"
+    header_match = re.search(r'==> Upgrading \d+ outdated package[s]?:\n((?:.+\n?)+)', output)
+    if header_match:
+        for line in header_match.group(1).strip().splitlines():
+            line = line.strip()
+            if line and not line.startswith('==>'):
+                name = line.split()[0]
+                if name:
+                    names.append(name)
+        if names:
+            return names
+
+    # Fallback: look for "==> Upgrading package_name" lines
+    for match in re.finditer(r'==> Upgrading (.+?)\.\.\.', output):
+        name = match.group(1).strip()
+        if name:
+            names.append(name)
+
+    if names:
+        return names
+
+    # Fallback: look for lines with "package version -> version"
+    for match in re.finditer(r'^(\S+)\s+[\d.]+ -> [\d.]+', output, re.MULTILINE):
+        name = match.group(1).strip()
+        if name and not name.startswith('==>'):
+            names.append(name)
+
+    return names
+
+
 def parse_upgrade_count(output: str) -> int:
     """
     Parse the number of upgraded packages from brew output.

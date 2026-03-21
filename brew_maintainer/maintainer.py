@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 from pathlib import Path
 
 from .utils import (
-    run_command, parse_upgrade_count, parse_cleanup_size,
+    run_command, parse_upgrade_count, parse_upgraded_names, parse_cleanup_size,
     create_askpass_env, cleanup_askpass_env, keychain_has_password,
     prime_sudo_credentials
 )
@@ -34,6 +34,8 @@ class BrewMaintainer:
         self.stats = {
             'formulae_upgraded': 0,
             'casks_upgraded': 0,
+            'formulae_names': [],
+            'casks_names': [],
             'space_freed': '0 B',
             'backup_created': False
         }
@@ -92,6 +94,7 @@ class BrewMaintainer:
             )
             formulae_count = parse_upgrade_count(result_formula.stdout)
             self.stats['formulae_upgraded'] = formulae_count
+            self.stats['formulae_names'] = parse_upgraded_names(result_formula.stdout)
 
             if formulae_count == 0:
                 self.logger.info("No formulae to upgrade")
@@ -99,12 +102,13 @@ class BrewMaintainer:
         except Exception as e:
             self.logger.warning(f"Failed to upgrade formulae: {e}")
             self.stats['formulae_upgraded'] = 0
+            self.stats['formulae_names'] = []
 
         # Step 3: Upgrade casks (with --greedy to catch auto-updating casks)
         self.logger.info("Upgrading casks...")
         try:
             result_cask = run_command(
-                ['brew', 'upgrade', '--cask', '--greedy'],
+                ['brew', 'upgrade', '--cask', '--greedy', '--force'],
                 dry_run=self.dry_run,
                 check=False,  # Don't fail if nothing to upgrade
                 env=env,
@@ -112,6 +116,7 @@ class BrewMaintainer:
             )
             casks_count = parse_upgrade_count(result_cask.stdout)
             self.stats['casks_upgraded'] = casks_count
+            self.stats['casks_names'] = parse_upgraded_names(result_cask.stdout)
 
             if casks_count == 0:
                 self.logger.info("No casks to upgrade")
@@ -119,13 +124,16 @@ class BrewMaintainer:
         except Exception as e:
             self.logger.warning(f"Failed to upgrade casks: {e}")
             self.stats['casks_upgraded'] = 0
+            self.stats['casks_names'] = []
 
         total_upgraded = self.stats['formulae_upgraded'] + self.stats['casks_upgraded']
         self.logger.info(f"Package updates complete: {total_upgraded} packages upgraded")
 
         return {
             'formulae_upgraded': self.stats['formulae_upgraded'],
-            'casks_upgraded': self.stats['casks_upgraded']
+            'casks_upgraded': self.stats['casks_upgraded'],
+            'formulae_names': self.stats['formulae_names'],
+            'casks_names': self.stats['casks_names']
         }
 
     def cleanup(self) -> Dict[str, Any]:
@@ -257,7 +265,7 @@ class BrewMaintainer:
             update_stats = self.update_packages()
         except Exception as e:
             self.logger.error(f"Update failed: {e}")
-            update_stats = {'formulae_upgraded': 0, 'casks_upgraded': 0}
+            update_stats = {'formulae_upgraded': 0, 'casks_upgraded': 0, 'formulae_names': [], 'casks_names': []}
 
         # Cleanup
         try:
@@ -282,7 +290,11 @@ class BrewMaintainer:
         self.logger.info("=" * 60)
         self.logger.info("Maintenance complete")
         self.logger.info(f"  Formulae upgraded: {all_stats.get('formulae_upgraded', 0)}")
+        for name in all_stats.get('formulae_names', []):
+            self.logger.info(f"    - {name}")
         self.logger.info(f"  Casks upgraded: {all_stats.get('casks_upgraded', 0)}")
+        for name in all_stats.get('casks_names', []):
+            self.logger.info(f"    - {name}")
         self.logger.info(f"  Space freed: {all_stats.get('space_freed', 'Unknown')}")
         self.logger.info(f"  Backup created: {all_stats.get('backup_created', False)}")
         self.logger.info("=" * 60)
