@@ -12,3 +12,6 @@ dependencies = []
 
 [project.scripts]
 brew-maintainer = "brew_maintainer.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["brew_maintainer*"]

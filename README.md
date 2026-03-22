@@ -12,13 +12,17 @@ Automated Homebrew package maintenance tool that updates formulae and casks, cle
 ## Installation
 
 ```bash
-# Clone or navigate to the project directory
-cd /Users/carlos/dev/carlos/brew-maintainer
+# Clone the repo and run the install script
+git clone https://github.com/casanabria2/brew-maintainer.git
+cd brew-maintainer
+./install.sh
+```
 
-# Install as a package (optional)
-pip install -e .
+Open a new terminal after installing for the `brew-maintainer` command to be available.
 
-# Or run directly with Python
+You can also run directly without installing:
+
+```bash
 python -m brew_maintainer
 ```
 
@@ -91,17 +95,17 @@ The password is stored securely in your macOS login keychain under the service n
 
 ## Backup System
 
-The backup is stored as a single `Brewfile` in the `backups/` directory. Each time you run the maintainer, it overwrites this file with the current state of your Homebrew packages. Git tracks the history of changes, so you can see what was added or removed over time.
+Backups are stored as `backups/Brewfile.<hostname>`, so each computer keeps its own Brewfile without overwriting the other. Git tracks the history of changes, so you can see what was added or removed over time.
 
 ```bash
-# View backup
-cat backups/Brewfile
+# View backup for this machine
+cat backups/Brewfile.$(hostname -s | tr '[:upper:]' '[:lower:]')
 
 # View backup history
-git log backups/Brewfile
+git log backups/
 
 # See changes since last backup
-git diff backups/Brewfile
+git diff backups/
 ```
 
 ## Logs
@@ -141,8 +145,9 @@ brew-maintainer/
 │   ├── maintainer.py
 │   ├── backup.py
 │   └── utils.py
+├── install.sh
 ├── backups/
-│   └── Brewfile
+│   └── Brewfile.<hostname>
 ├── logs/
 │   └── brew_maintainer.log
 └── tests/

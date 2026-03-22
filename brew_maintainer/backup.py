@@ -2,6 +2,7 @@
 
 import logging
 import os
+import platform
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -31,7 +32,8 @@ class BrewBackupManager:
             project_root = Path(__file__).parent.parent
             self.backup_dir = project_root / 'backups'
 
-        self.brewfile_path = self.backup_dir / 'Brewfile'
+        hostname = platform.node().split('.')[0].lower()
+        self.brewfile_path = self.backup_dir / f'Brewfile.{hostname}'
 
     def create_backup(self) -> Dict[str, Any]:
         """
