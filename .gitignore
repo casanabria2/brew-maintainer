@@ -9,6 +9,11 @@ env/
 ENV/
 .venv
 
+# Packaging
+*.egg-info/
+build/
+dist/
+
 # Logs
 logs/*.log
 *.log
