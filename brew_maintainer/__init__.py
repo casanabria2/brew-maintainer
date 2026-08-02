@@ -1,5 +1,5 @@
 """Homebrew package maintainer."""
 
 __version__ = "1.0.0"
-__author__ = "Carlos"
+__author__ = "Carlos Sanabria"
 __description__ = "Automated Homebrew package maintenance"
