@@ -126,10 +126,30 @@ class BrewBackupManager:
         except Exception as e:
             self.logger.warning(f"Failed to add timestamp header: {e}")
 
+    def _git(self, *args: str, respect_dry_run: bool = True):
+        """
+        Run a git command scoped to the backup directory.
+
+        Using `git -C` keeps every git operation pointed at the repo holding
+        the Brewfile, rather than whatever directory the tool was invoked from.
+
+        Args:
+            args: Arguments to pass to git
+            respect_dry_run: If False, run even in dry-run mode (read-only checks)
+
+        Returns:
+            CompletedProcess object
+        """
+        return run_command(
+            ['git', '-C', str(self.backup_dir), *args],
+            check=False,
+            dry_run=self.dry_run if respect_dry_run else False
+        )
+
     def _git_commit_if_repo(self) -> None:
-        """Commit backup changes if in a git repository."""
+        """Commit backup changes if in a git repository, then sync with remote."""
         if self.dry_run:
-            self.logger.info("[DRY RUN] Would commit Brewfile to git")
+            self.logger.info("[DRY RUN] Would commit Brewfile to git and sync with remote")
             return
 
         # Check if we're in a git repo
@@ -139,17 +159,11 @@ class BrewBackupManager:
 
         try:
             # Add the Brewfile
-            run_command(
-                ['git', 'add', str(self.brewfile_path)],
-                check=False,
-                dry_run=self.dry_run
-            )
+            self._git('add', str(self.brewfile_path))
 
             # Check if there are changes to commit
-            status_result = run_command(
-                ['git', 'status', '--porcelain', str(self.brewfile_path)],
-                check=False,
-                dry_run=self.dry_run
+            status_result = self._git(
+                'status', '--porcelain', str(self.brewfile_path)
             )
 
             if status_result.stdout.strip():
@@ -157,26 +171,61 @@ class BrewBackupManager:
                 timestamp = datetime.now().isoformat()
                 commit_message = f"Update Brewfile backup - {timestamp}"
 
-                run_command(
-                    ['git', 'commit', '-m', commit_message],
-                    check=False,
-                    dry_run=self.dry_run
-                )
+                self._git('commit', '-m', commit_message)
                 self.logger.info("Backup committed to git")
             else:
                 self.logger.debug("No changes to commit")
 
+            # Sync even when nothing was committed: earlier runs, or another
+            # machine, may have left commits that were never pushed.
+            self._git_sync_with_remote()
+
         except Exception as e:
             self.logger.warning(f"Failed to commit to git: {e}")
+
+    def _git_sync_with_remote(self) -> None:
+        """
+        Rebase onto the remote and push.
+
+        The pull has to happen *after* the commit, not before: `git pull
+        --rebase` refuses to run with a dirty working tree, and the freshly
+        dumped Brewfile is exactly that until it has been committed.
+
+        Each machine writes its own Brewfile.<hostname>, so rebasing is
+        normally conflict-free. If it isn't, the rebase is aborted and the
+        commit stays local for the next run to retry.
+        """
+        upstream = self._git(
+            'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'
+        )
+        if upstream.returncode != 0:
+            self.logger.debug("No upstream branch configured, skipping remote sync")
+            return
+
+        upstream_name = upstream.stdout.strip()
+
+        pull_result = self._git('pull', '--rebase')
+        if pull_result.returncode != 0:
+            # Never leave the repo mid-rebase.
+            self._git('rebase', '--abort')
+            self.logger.warning(
+                f"Could not rebase onto {upstream_name}, leaving commit local: "
+                f"{pull_result.stderr.strip()}"
+            )
+            return
+
+        push_result = self._git('push')
+        if push_result.returncode != 0:
+            self.logger.warning(
+                f"Failed to push backup: {push_result.stderr.strip()}"
+            )
+        else:
+            self.logger.info(f"Backup pushed to {upstream_name}")
 
     def _is_git_repo(self) -> bool:
         """Check if the backup directory is in a git repository."""
         try:
-            result = run_command(
-                ['git', 'rev-parse', '--git-dir'],
-                check=False,
-                capture_output=True
-            )
+            result = self._git('rev-parse', '--git-dir', respect_dry_run=False)
             return result.returncode == 0
         except Exception:
             return False
