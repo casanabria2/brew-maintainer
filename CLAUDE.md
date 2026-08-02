@@ -50,9 +50,15 @@ CLI (cli.py) → BrewMaintainer (maintainer.py) → BrewBackupManager (backup.py
 - `utils.py`: `run_command()` subprocess wrapper with dry-run support, logging setup, output parsing
 
 **Data flow:**
-- Brewfile generated at `backups/Brewfile` with timestamp header
-- Git auto-commits if repo detected (checked via `git rev-parse --git-dir`)
+- Brewfile generated at `backups/Brewfile.<hostname>` with timestamp header, where hostname is `platform.node()` lowercased and stripped of its domain — each machine owns its own file
+- Git auto-commits if repo detected (checked via `git rev-parse --git-dir`), then rebases onto the upstream and pushes
 - Logs written to `logs/brew_maintainer.log` (rotating: 10MB, 5 backups)
+
+**Git sync (`_git_sync_with_remote`):**
+- All git calls are scoped with `git -C <backup_dir>` so they target the repo holding the Brewfile, not the process CWD
+- Order is commit → `pull --rebase` → `push`. The pull must follow the commit: `git pull --rebase` refuses to run against a dirty tree, and the freshly dumped Brewfile is exactly that until committed
+- Sync runs even when the Brewfile is unchanged, so a backlog of unpushed commits drains on the next run
+- Failures never escalate: a rebase conflict aborts and keeps the commit local, and a missing upstream or unreachable remote degrades to a warning
 
 **Error handling:**
 - `BrewNotFoundError` (exit 2): Homebrew not installed
