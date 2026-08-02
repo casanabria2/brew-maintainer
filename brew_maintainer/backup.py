@@ -51,13 +51,13 @@ class BrewBackupManager:
 
         self.logger.debug(f"Creating backup at: {self.brewfile_path}")
 
-        # Generate Brewfile with descriptions
+        # Generate Brewfile. Descriptions are emitted by default; the
+        # --describe switch that used to request them is deprecated.
         try:
             run_command([
                 'brew', 'bundle', 'dump',
                 '--file', str(self.brewfile_path),
-                '--force',  # Overwrite existing
-                '--describe'  # Add description comments
+                '--force'  # Overwrite existing
             ], dry_run=self.dry_run)
 
         except Exception as e:
